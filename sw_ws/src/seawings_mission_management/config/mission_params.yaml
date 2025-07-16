@@ -1,0 +1,22 @@
+power_monitor:
+  ros__parameters:
+    safety_margin: 0.25          # 25% safety margin for RTL calculation
+    average_return_speed: 12.0   # Average return speed in m/s
+    battery_check_interval: 5.0  # Check battery every 5 seconds
+    min_battery_voltage: 14.0    # Minimum acceptable battery voltage
+    rtl_triggered_threshold: 0.25 # Trigger RTL at 25% battery
+
+fault_detector:
+  ros__parameters:
+    gps_timeout: 15.0           # GPS timeout in seconds
+    min_satellites: 6           # Minimum satellites for good fix
+    min_fix_type: 3             # Minimum GPS fix type (3 = 3D fix)
+    check_interval: 2.0         # System health check interval
+
+mission_supervisor:
+  ros__parameters:
+    heartbeat_timeout: 30.0     # MAVROS heartbeat timeout
+    telemetry_timeout: 10.0     # Telemetry timeout
+    mission_timeout: 3600.0     # Maximum mission duration (1 hour)
+    check_interval: 1.0         # Supervision check interval
+
