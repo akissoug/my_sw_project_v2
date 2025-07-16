@@ -10,15 +10,6 @@ wget https://d176tv9ibo4jno.cloudfront.net/latest/QGroundControl.AppImage
 chmod +x QGroundControl.AppImage
 sudo mv QGroundControl.AppImage /usr/local/bin/
 
-# Create desktop shortcut (optional)
-echo "[Desktop Entry]
-Name=QGroundControl
-Comment=Ground Control Station
-Exec=/usr/local/bin/QGroundControl.AppImage
-Icon=qgroundcontrol
-Terminal=false
-Type=Application
-Categories=Utility;" > ~/.local/share/applications/qgroundcontrol.desktop
 ```
 
 ### 2. Install micro XRCE-DDS Agent (if not already installed)
@@ -189,40 +180,7 @@ ros2 node list
 
 # Get node info
 ros2 node info /power_monitor
-```
 
-## Common Issues and Solutions
-
-### 1. XRCE-DDS Agent not found
-```bash
-# Check installation
-which MicroXRCEAgent
-
-# If not found, add to PATH
-echo 'export PATH=$PATH:/usr/local/bin' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 2. PX4 SITL fails to start
-```bash
-# Clean and rebuild
-cd ~/PX4-Autopilot
-make clean
-make px4_sitl gazebo
-```
-
-### 3. QGC doesn't connect
-- Check firewall: `sudo ufw allow 14550/udp`
-- Ensure PX4 is running first
-- Try manual connection: Settings → Comm Links → Add → UDP port 14550
-
-### 4. Nodes not receiving data
-```bash
-# Check if topics exist
-ros2 topic list | grep fmu
-
-# If no /fmu topics, XRCE-DDS agent may not be connected
-# Restart agent and PX4
 ```
 
 ## Testing Scenarios
