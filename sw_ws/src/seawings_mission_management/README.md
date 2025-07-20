@@ -23,7 +23,17 @@ make
 sudo make install
 sudo ldconfig /usr/local/lib/
 ```
-
+### 3. Install px4_msgs
+```bash
+#see px4 documentation
+```
+### 4. Build
+```bash
+# Terminal 1: Launch everything
+cd ~/sw_ws
+colcon build
+source install/setup.bash
+```
 
 ## Running Simulation - Method 1: Using Launch File
 
