@@ -1,6 +1,6 @@
-# Complete SEAWINGS Simulation Guide - Step by Step
+# SEAWINGS Simulation Guide
 
-## Prerequisites Installation
+## Installation
 
 ### 1. Install QGroundControl
 ```bash
@@ -194,7 +194,7 @@ ros2 topic echo /seawings/mission_status
 
 In the PX4 terminal, run these commands: (also modify battery thresholds in QGC)
 
-bash
+```bash
 #### Enable battery simulation
 param set SIM_BAT_ENABLE 1
 
@@ -214,7 +214,7 @@ param set BAT1_EMER_THR 0.1     # Emergency at 10%
 
 #### Save parameters
 param save
-
+```
 
 
 ## Quick Reference Commands
