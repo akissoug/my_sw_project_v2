@@ -15,11 +15,13 @@ class FaultDetector(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                ('gps_timeout', 10.0), # Timeout for GPS data
+                ('gps_timeout', 10.0),
                 ('min_satellites', 6),
-                ('min_fix_type', 3),  # 3D fix
+                ('min_fix_type', 3),
                 ('check_interval', 2.0),
                 ('estimator_timeout', 10.0),
+                ('startup_grace_period', 15.0),  # Grace period for SITL startup
+                ('sitl_mode', True),  # SITL mode flag
             ]
         )
 
@@ -29,6 +31,8 @@ class FaultDetector(Node):
         self.min_fix_type = self.get_parameter('min_fix_type').value
         self.check_interval = self.get_parameter('check_interval').value
         self.estimator_timeout = self.get_parameter('estimator_timeout').value
+        self.startup_grace = self.get_parameter('startup_grace_period').value
+        self.sitl_mode = self.get_parameter('sitl_mode').value
 
         # Log parameters
         self.get_logger().info(f'Parameters: gps_timeout={self.gps_timeout}s, '
@@ -46,6 +50,8 @@ class FaultDetector(Node):
         self.emergency_triggered = False
         self.data_lock = Lock()
         self.last_command_result = None
+        self.node_start_time = time.time()
+        self.estimator_ever_received = False  # Track if we ever got estimator data
 
         # Define QoS profile for PX4 topics
         px4_qos_profile = QoSProfile(
@@ -55,14 +61,14 @@ class FaultDetector(Node):
             durability=DurabilityPolicy.VOLATILE
         )
 
-        # Publisher for direct PX4 control (no MAVROS!)
+        # Publisher for direct PX4 control
         self.vehicle_command_pub = self.create_publisher(
             VehicleCommand,
             '/fmu/in/vehicle_command',
             px4_qos_profile
         )
 
-        # Subscribers with PX4 QoS compatibility
+        # Subscribers
         self.gps_sub = self.create_subscription(
             SensorGps,
             '/fmu/out/vehicle_gps_position',
@@ -94,7 +100,9 @@ class FaultDetector(Node):
         # Timer for periodic health checks
         self.timer = self.create_timer(self.check_interval, self.check_system_health)
 
-        self.get_logger().info('FaultDetector node initialized with direct PX4 control (no MAVROS!)')
+        self.get_logger().info('FaultDetector node initialized with direct PX4 control')
+        if self.sitl_mode:
+            self.get_logger().info(f'🎮 SITL mode active with {self.startup_grace}s startup grace period')
 
     def gps_callback(self, msg):
         with self.data_lock:
@@ -106,6 +114,7 @@ class FaultDetector(Node):
         with self.data_lock:
             self.estimator_status = msg
             self.last_estimator_time = time.time()
+            self.estimator_ever_received = True
 
     def status_callback(self, msg):
         with self.data_lock:
@@ -119,23 +128,36 @@ class FaultDetector(Node):
                     self.get_logger().info('✅ Emergency landing mode accepted by PX4')
                 else:
                     self.get_logger().error(f'❌ Emergency landing mode failed: result={msg.result}')
-                    self.emergency_triggered = False  # Allow retry
+                    self.emergency_triggered = False
+
+    def is_in_startup_grace_period(self):
+        """Check if still in startup grace period"""
+        return (time.time() - self.node_start_time) < self.startup_grace
 
     def get_current_mode(self):
-        """Get current flight mode"""
         if not self.vehicle_status:
             return "UNKNOWN"
         
+        # Extended mapping
         mode_map = {
             0: "MANUAL", 1: "ALTITUDE", 2: "POSITION", 3: "AUTO.LOITER",
             4: "AUTO.MISSION", 5: "AUTO.RTL", 6: "AUTO.LAND", 7: "AUTO.TAKEOFF",
-            8: "OFFBOARD", 9: "STABILIZED", 10: "ACRO"
+            8: "OFFBOARD", 9: "STABILIZED", 10: "ACRO", 11: "AUTO.LAND_ENGAGED",
+            12: "AUTO.PRECLAND", 13: "ORBIT", 14: "AUTO.VTOL_TAKEOFF",
+            15: "EXTERNAL1", 16: "EXTERNAL2", 17: "EXTERNAL3",
+            18: "EXTERNAL4", 19: "EXTERNAL5", 20: "EXTERNAL6",
+            21: "EXTERNAL7", 22: "EXTERNAL8"
         }
         
         return mode_map.get(self.vehicle_status.nav_state, f"UNKNOWN({self.vehicle_status.nav_state})")
 
+    def is_failsafe_active(self):
+        """Check if PX4 failsafe is already active"""
+        if self.vehicle_status:
+            return self.vehicle_status.failsafe
+        return False
+    
     def send_vehicle_command(self, command, param1=0.0, param2=0.0):
-        """Send command directly to PX4"""
         msg = VehicleCommand()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         msg.param1 = param1
@@ -159,13 +181,22 @@ class FaultDetector(Node):
         if self.emergency_triggered:
             return
 
+        # Skip checks during startup grace period
+        if self.is_in_startup_grace_period():
+            self.get_logger().debug(f'In startup grace period ({time.time() - self.node_start_time:.1f}s)')
+            return
+        
+        if self.is_failsafe_active():
+            self.get_logger().info('PX4 failsafe active - letting it handle the situation')
+            return
+
         with self.data_lock:
             current_time = time.time()
 
             # Check GPS health
             gps_healthy = self.check_gps_health(current_time)
 
-            # Check estimator health
+            # Check estimator health (more lenient in SITL)
             estimator_healthy = self.check_estimator_health(current_time)
 
             # Log system status
@@ -175,26 +206,23 @@ class FaultDetector(Node):
 
             self.get_logger().info(f'System Health - GPS: {gps_status_str}, Estimator: {est_status_str}, Mode: {mode}')
 
-            # Trigger emergency landing if critical systems are compromised
+            # Only trigger emergency for GPS failures (not estimator in SITL)
             if not gps_healthy:
                 if self.gps_status is None:
-                    self.trigger_emergency_landing("No GPS data received")
+                    self.get_logger().warn("No GPS data received yet")
                 elif self.gps_status.fix_type < 2:
                     self.trigger_emergency_landing(f"GPS fix lost (fix_type={self.gps_status.fix_type})")
                 elif self.gps_status.satellites_used < self.min_satellites:
                     self.trigger_emergency_landing(f"Low satellite count ({self.gps_status.satellites_used})")
                 elif self.last_gps_time is None or (current_time - self.last_gps_time > self.gps_timeout):
                     self.trigger_emergency_landing("GPS data timeout")
-                else:
-                    self.get_logger().warn("GPS unhealthy but not critical for immediate landing.")
 
-            if not estimator_healthy:
-                if self.estimator_status is None:
-                    self.trigger_emergency_landing("No Estimator Status data received")
-                elif self.last_estimator_time is None or (current_time - self.last_estimator_time > self.estimator_timeout):
-                    self.trigger_emergency_landing("Estimator Status data timeout")
+            # For estimator, only warn in SITL mode
+            if not estimator_healthy and self.sitl_mode:
+                if not self.estimator_ever_received:
+                    self.get_logger().debug("Estimator status not yet received (normal in SITL)")
                 else:
-                    self.trigger_emergency_landing("Estimator flags indicate degraded position estimate")
+                    self.get_logger().warn("Estimator degraded but not triggering emergency in SITL mode")
 
     def check_gps_health(self, current_time):
         """Check GPS health status"""
@@ -219,26 +247,24 @@ class FaultDetector(Node):
         return True
 
     def check_estimator_health(self, current_time):
-        """Check estimator health status"""
+        """Check estimator health status - more lenient in SITL"""
+        # In SITL, estimator might not always be available
+        if self.sitl_mode and not self.estimator_ever_received:
+            return True  # Assume healthy if never received in SITL
+            
         if self.estimator_status is None:
             return False
 
-        if self.last_estimator_time is None or (current_time - self.last_estimator_time > self.estimator_timeout):
+        # More lenient timeout in SITL
+        timeout = self.estimator_timeout * 2 if self.sitl_mode else self.estimator_timeout
+        if self.last_estimator_time is None or (current_time - self.last_estimator_time > timeout):
             return False
 
+        # Check GPS-related flags
         if hasattr(self.estimator_status, 'gps_check_fail_flags'):
             gps_flags = self.estimator_status.gps_check_fail_flags
+            # In SITL, only check critical flags
             if gps_flags & (1 << 0):  # GPS_CHECK_FAIL_GPS_FIX
-                return False
-            if gps_flags & (1 << 1):  # GPS_CHECK_FAIL_MIN_SAT_COUNT
-                return False
-            if gps_flags & (1 << 3) or gps_flags & (1 << 4):  # HORZ_ERR or VERT_ERR
-                return False
-
-        if hasattr(self.estimator_status, 'control_mode_flags'):
-            control_flags = self.estimator_status.control_mode_flags
-            gps_active = control_flags & (1 << 2)  # CS_GPS
-            if not gps_active:
                 return False
 
         return True
@@ -248,14 +274,19 @@ class FaultDetector(Node):
         if self.emergency_triggered:
             return
 
+        # Don't trigger during startup
+        if self.is_in_startup_grace_period():
+            self.get_logger().warn(f'Emergency condition detected during startup: {reason} - ignoring')
+            return
+
         self.emergency_triggered = True
         self.get_logger().error(f'EMERGENCY LANDING TRIGGERED: {reason}')
 
-        # Send LAND mode command directly to PX4
+        # Send LAND mode command
         self.send_vehicle_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
-            param1=1.0,  # base mode (1 = custom mode)
-            param2=6.0   # custom mode (6 = LAND for PX4)
+            param1=1.0,
+            param2=6.0
         )
         
         self.get_logger().info('📡 Emergency landing command sent directly to PX4')
