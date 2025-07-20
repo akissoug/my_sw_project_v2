@@ -112,7 +112,10 @@ ros2 run seawings_mission_management mission_supervisor
 
 ### 3. Arming the Vehicle
 Arm the vehicle from px4 terminal by hitting:
+```bash
 commander arm
+```
+
 1. Go back to "Fly" tab
 2. Arm the vehicle from px4 terminal by hitting:
 commander arm
