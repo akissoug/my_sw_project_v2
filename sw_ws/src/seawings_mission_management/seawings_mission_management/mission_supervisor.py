@@ -28,12 +28,16 @@ class MissionSupervisor(Node):
         self.declare_parameter('telemetry_timeout', 10.0)
         self.declare_parameter('mission_timeout', 3600.0)
         self.declare_parameter('check_interval', 1.0)
+        self.declare_parameter('critical_battery_threshold', 5.0)  # 5% for real critical
+        self.declare_parameter('startup_grace_period', 10.0)  # Grace period for startup
         
         # Get parameters
         self.heartbeat_timeout = self.get_parameter('heartbeat_timeout').value
         self.telemetry_timeout = self.get_parameter('telemetry_timeout').value
         self.mission_timeout = self.get_parameter('mission_timeout').value
         self.check_interval = self.get_parameter('check_interval').value
+        self.critical_battery = self.get_parameter('critical_battery_threshold').value
+        self.startup_grace = self.get_parameter('startup_grace_period').value
         
         # State variables
         self.mission_state = MissionState.IDLE
@@ -46,6 +50,7 @@ class MissionSupervisor(Node):
         self.emergency_actions_taken = []
         self.data_lock = Lock()
         self.last_command_result = None
+        self.node_start_time = time.time()
         
         # Define QoS profile for PX4 topics
         px4_qos_profile = QoSProfile(
@@ -62,7 +67,7 @@ class MissionSupervisor(Node):
             px4_qos_profile
         )
         
-        # Subscribers with PX4 QoS compatibility
+        # Subscribers
         self.vehicle_status_sub = self.create_subscription(
             VehicleStatus,
             '/fmu/out/vehicle_status',
@@ -101,13 +106,14 @@ class MissionSupervisor(Node):
         # Timer for periodic mission supervision
         self.timer = self.create_timer(self.check_interval, self.supervise_mission)
         
-        self.get_logger().info('MissionSupervisor node initialized with direct PX4 control (no MAVROS!)')
+        self.get_logger().info('MissionSupervisor node initialized with direct PX4 control')
+        self.get_logger().info(f'Critical battery threshold: {self.critical_battery}%')
         
     def vehicle_status_callback(self, msg):
         with self.data_lock:
             self.vehicle_status = msg
             self.last_telemetry = time.time()
-            self.last_heartbeat = time.time()  # PX4 status serves as heartbeat
+            self.last_heartbeat = time.time()
             
     def battery_callback(self, msg):
         with self.data_lock:
@@ -125,28 +131,52 @@ class MissionSupervisor(Node):
             else:
                 self.get_logger().error(f'❌ Command {msg.command} failed: {msg.result}')
     
+    def get_battery_percentage(self):
+        """Get battery percentage handling both 0-1 and 0-100 scales"""
+        if self.battery_status is None:
+            return None
+            
+        if hasattr(self.battery_status, 'remaining'):
+            if self.battery_status.remaining <= 1.0:
+                return self.battery_status.remaining * 100
+            else:
+                return self.battery_status.remaining
+        return None
+    
     def get_current_mode(self):
-        """Get current flight mode name"""
         if not self.vehicle_status:
             return "UNKNOWN"
         
+        # Extended mapping including all nav states
         mode_map = {
             0: "MANUAL", 1: "ALTITUDE", 2: "POSITION", 3: "AUTO.LOITER",
             4: "AUTO.MISSION", 5: "AUTO.RTL", 6: "AUTO.LAND", 7: "AUTO.TAKEOFF",
-            8: "OFFBOARD", 9: "STABILIZED", 10: "ACRO"
+            8: "OFFBOARD", 9: "STABILIZED", 10: "ACRO", 11: "AUTO.LAND_ENGAGED",
+            12: "AUTO.PRECLAND", 13: "ORBIT", 14: "AUTO.VTOL_TAKEOFF",
+            15: "EXTERNAL1", 16: "EXTERNAL2", 17: "EXTERNAL3",
+            18: "EXTERNAL4", 19: "EXTERNAL5", 20: "EXTERNAL6",
+            21: "EXTERNAL7", 22: "EXTERNAL8"
         }
         
         return mode_map.get(self.vehicle_status.nav_state, f"UNKNOWN({self.vehicle_status.nav_state})")
     
+    def is_failsafe_active(self):
+        """Check if PX4 failsafe is already active"""
+        if self.vehicle_status:
+            return self.vehicle_status.failsafe
+        return False
+    
+    
     def is_armed(self):
-        """Check if vehicle is armed"""
         if not self.vehicle_status:
             return False
-        # PX4 arming states: 1=standby, 2=armed
         return self.vehicle_status.arming_state == 2
     
+    def is_in_startup_grace_period(self):
+        """Check if still in startup grace period"""
+        return (time.time() - self.node_start_time) < self.startup_grace
+    
     def send_vehicle_command(self, command, param1=0.0, param2=0.0):
-        """Send command directly to PX4"""
         msg = VehicleCommand()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         msg.param1 = param1
@@ -170,26 +200,25 @@ class MissionSupervisor(Node):
         with self.data_lock:
             current_time = time.time()
             
-            # Update mission state based on vehicle status
+            # Update mission state
             self.update_mission_state()
             
-            # Check for communication timeouts
-            self.check_communication_health(current_time)
+            # Skip emergency checks during startup grace period
+            if not self.is_in_startup_grace_period():
+                # Check for communication timeouts
+                self.check_communication_health(current_time)
+                
+                # Check mission duration
+                self.check_mission_duration(current_time)
+                
+                # Check for emergency conditions
+                self.check_emergency_conditions()
             
-            # Check mission duration
-            self.check_mission_duration(current_time)
-            
-            # Check for emergency conditions
-            self.check_emergency_conditions()
-            
-            # Publish mission status
+            # Always publish status and log
             self.publish_mission_status()
-            
-            # Log mission state
             self.log_mission_state()
             
     def update_mission_state(self):
-        """Update internal mission state based on vehicle status"""
         if self.vehicle_status is None:
             return
             
@@ -206,12 +235,16 @@ class MissionSupervisor(Node):
             self.mission_state = MissionState.MISSION
             if self.mission_start_time is None:
                 self.mission_start_time = time.time()
+        elif current_mode == 'OFFBOARD':
+            self.mission_state = MissionState.MISSION
+            if self.mission_start_time is None:
+                self.mission_start_time = time.time()
         elif current_mode == 'AUTO.RTL':
             self.mission_state = MissionState.RTL
-        elif current_mode in ['AUTO.LAND', 'AUTO.PRECLAND']:
+        elif current_mode in ['AUTO.LAND', 'AUTO.PRECLAND', 'AUTO.LAND_ENGAGED']:
             self.mission_state = MissionState.LANDING
-        elif current_mode in ['STABILIZED', 'ALTITUDE', 'POSITION']:
-            self.mission_state = MissionState.EMERGENCY
+        elif current_mode in ['STABILIZED', 'ALTITUDE', 'POSITION'] and is_armed:
+            self.mission_state = MissionState.ARMED
         elif is_armed:
             self.mission_state = MissionState.ARMED
         else:
@@ -222,8 +255,13 @@ class MissionSupervisor(Node):
             self.get_logger().info(f'Mission state changed: {old_state.name} -> {self.mission_state.name}')
             
     def check_communication_health(self, current_time):
-        """Check communication link health"""
-        # Check heartbeat (vehicle status)
+
+        # Is it ok here to check failsafe?
+        if self.is_failsafe_active():
+            self.get_logger().info('PX4 failsafe active - letting it handle the situation')
+            return
+        
+        # Check heartbeat
         if self.last_heartbeat is not None:
             heartbeat_age = current_time - self.last_heartbeat
             if heartbeat_age > self.heartbeat_timeout:
@@ -236,59 +274,54 @@ class MissionSupervisor(Node):
                 self.handle_communication_loss("Telemetry timeout")
                 
     def check_mission_duration(self, current_time):
-        """Check if mission has exceeded maximum duration"""
         if self.mission_start_time is not None:
             mission_duration = current_time - self.mission_start_time
             if mission_duration > self.mission_timeout:
                 self.handle_mission_timeout()
                 
     def check_emergency_conditions(self):
-        """Check for emergency conditions requiring immediate action"""
         if self.battery_status is None:
             return
             
-        # Check for critical battery level
-        if self.battery_status.remaining < 5.0:  # 5% battery remaining
+        battery_percentage = self.get_battery_percentage()
+        if battery_percentage is None:
+            return
+            
+        # Check for truly critical battery level
+        if battery_percentage < self.critical_battery:
             self.handle_critical_battery()
             
-        # Check for other emergency conditions
-        if self.vehicle_status is not None:
-            # Check for failsafe activation
-            if self.vehicle_status.failsafe:
-                self.handle_failsafe_activation()
+        # Check for failsafe
+        if self.vehicle_status is not None and self.vehicle_status.failsafe:
+            self.handle_failsafe_activation()
                 
     def handle_communication_loss(self, reason):
-        """Handle communication loss scenarios"""
         if "comm_loss" not in self.emergency_actions_taken:
             self.emergency_actions_taken.append("comm_loss")
             self.get_logger().error(f'Communication loss detected: {reason}')
             
-            # Trigger RTL if not already in emergency mode
             if self.mission_state not in [MissionState.RTL, MissionState.LANDING, MissionState.EMERGENCY]:
                 self.trigger_mode_change('RTL', 'Communication loss')
                 
     def handle_mission_timeout(self):
-        """Handle mission timeout"""
         if "mission_timeout" not in self.emergency_actions_taken:
             self.emergency_actions_taken.append("mission_timeout")
             self.get_logger().warn('Mission timeout - triggering RTL')
             self.trigger_mode_change('RTL', 'Mission timeout')
             
     def handle_critical_battery(self):
-        """Handle critical battery level"""
         if "critical_battery" not in self.emergency_actions_taken:
             self.emergency_actions_taken.append("critical_battery")
-            self.get_logger().error('CRITICAL BATTERY - triggering emergency landing')
+            battery_pct = self.get_battery_percentage()
+            self.get_logger().error(f'CRITICAL BATTERY ({battery_pct:.1f}%) - triggering emergency landing')
             self.trigger_mode_change('LAND', 'Critical battery')
             
     def handle_failsafe_activation(self):
-        """Handle PX4 failsafe activation"""
         if "failsafe" not in self.emergency_actions_taken:
             self.emergency_actions_taken.append("failsafe")
             self.get_logger().error('PX4 failsafe activated')
             
     def trigger_mode_change(self, mode, reason):
-        """Trigger a mode change via direct PX4 command"""
         self.get_logger().info(f'Triggering mode change to {mode}: {reason}')
         
         mode_map = {
@@ -302,37 +335,35 @@ class MissionSupervisor(Node):
         if mode in mode_map:
             self.send_vehicle_command(
                 VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
-                param1=1.0,  # base mode
-                param2=mode_map[mode]  # custom mode
+                param1=1.0,
+                param2=mode_map[mode]
             )
         else:
             self.get_logger().error(f'Unknown mode: {mode}')
             
     def arm_vehicle(self):
-        """Arm the vehicle"""
         self.send_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
-            param1=1.0  # 1.0 = arm
+            param1=1.0
         )
         
     def disarm_vehicle(self):
-        """Disarm the vehicle"""
         self.send_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
-            param1=0.0  # 0.0 = disarm
+            param1=0.0
         )
             
     def publish_mission_status(self):
-        """Publish current mission status"""
         msg = String()
         msg.data = f'{self.mission_state.name}'
         self.mission_status_pub.publish(msg)
         
     def log_mission_state(self):
-        """Log detailed mission state information"""
         if self.mission_state == MissionState.MISSION and self.mission_start_time is not None:
             mission_duration = time.time() - self.mission_start_time
-            battery_pct = self.battery_status.remaining if self.battery_status else 0
+            battery_pct = self.get_battery_percentage()
+            if battery_pct is None:
+                battery_pct = 0
             current_mode = self.get_current_mode()
             
             self.get_logger().info(
