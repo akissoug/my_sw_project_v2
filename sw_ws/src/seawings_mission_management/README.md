@@ -29,7 +29,7 @@ sudo ldconfig /usr/local/lib/
 ```
 ### 4. Build
 ```bash
-# Terminal 1: Launch everything
+# Before simulation
 cd ~/sw_ws
 colcon build
 source install/setup.bash
