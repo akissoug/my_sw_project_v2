@@ -103,30 +103,21 @@ ros2 run seawings_mission_management mission_supervisor
 - **Check telemetry**: Battery, GPS, altitude should show data
 - **Safety check**: Ensure area is clear in simulation
 
-### 2. Arming the Vehicle
-1. Click on the mode indicator (top center)
-2. Select "Position" mode
-3. Slide the "Arm" slider at bottom of screen
-4. Drone propellers will start spinning
-
-### 3. Manual Takeoff
-1. After arming, click "Takeoff" button
-2. Set altitude (e.g., 10 meters)
-3. Slide to confirm
-4. Watch drone rise in Gazebo
-
-### 4. Creating a Mission
+### 2. Creating a Mission
 1. Click "Plan" tab (left side)
 2. Click on map to add waypoints
 3. Set altitude for each waypoint
 4. Add "Return to Launch" at end
 5. Click "Upload" button
 
-### 5. Flying the Mission
+### 3. Arming the Vehicle
+Arm the vehicle from px4 terminal by hitting:
+commander arm
 1. Go back to "Fly" tab
-2. Change mode to "Mission"
-3. Slide to start mission
-4. Monitor progress on map
+2. Arm the vehicle from px4 terminal by hitting:
+commander arm
+Now the drone should start the mission.
+
 
 ### 6. Testing Nodes
 
@@ -168,20 +159,6 @@ ros2 topic echo /fmu/out/vehicle_gps_position
 ros2 topic echo /seawings/mission_status
 ```
 
-### Terminal 8: Check Node Status
-```bash
-# List running nodes
-ros2 node list
-
-# Should see:
-# /power_monitor
-# /fault_detector
-# /mission_supervisor
-
-# Get node info
-ros2 node info /power_monitor
-
-```
 
 ## Testing Scenarios
 
@@ -213,20 +190,32 @@ ros2 node info /power_monitor
 2. Start long mission
 3. MissionSupervisor should trigger RTL
 
-## Shutting Down
+### Extras:
 
-1. Land the drone first (in QGC)
-2. Disarm the vehicle
-3. Close QGroundControl
-4. Stop nodes: Ctrl+C in each terminal
-5. Stop PX4: Ctrl+C in PX4 terminal
-6. Stop XRCE-DDS Agent: Ctrl+C
+In the PX4 terminal, run these commands: (also modify battery thresholds in QGC)
 
-## Next Steps
+bash
+#### Enable battery simulation
+param set SIM_BAT_ENABLE 1
 
-1. **Modify parameters**: Edit `config/mission_params.yaml`
-2. **Add features**: Extend nodes with new capabilities
-3. **Logging**: Implement flight data recording
+#### Set battery drain rate (current in Amps)
+param set SIM_BAT_DRAIN 15.0    # 15A current draw
+
+#### Optional: Set battery parameters
+param set BAT1_CAPACITY 5000    # 5000 mAh battery
+param set BAT1_N_CELLS 4        # 4S battery
+param set BAT1_V_CHARGED 4.2    # Voltage per cell when full
+param set BAT1_V_EMPTY 3.5      # Voltage per cell when empty
+
+#### Set thresholds
+param set BAT1_LOW_THR 0.3      # Low battery at 30%
+param set BAT1_CRIT_THR 0.2     # Critical at 20%
+param set BAT1_EMER_THR 0.1     # Emergency at 10%
+
+#### Save parameters
+param save
+
+
 
 ## Quick Reference Commands
 
@@ -240,7 +229,4 @@ ros2 topic echo /seawings/mission_status
 # Emergency stop (in PX4 console)
 commander disarm -f
 
-# Check system health
-ros2 node list
-ros2 topic list | grep fmu
 ```
