@@ -25,7 +25,6 @@ class PowerMonitor(Node):
         self.declare_parameter('current_averaging_window', 10)
         self.declare_parameter('home_position_timeout', 30.0)
         self.declare_parameter('sitl_mode', True)
-        self.declare_parameter('sitl_battery_drain_rate', 0.2)  # % per minute in SITL
 
         self.safety_margin = self.get_parameter('safety_margin').value
         self.return_speed = self.get_parameter('average_return_speed').value
@@ -36,7 +35,6 @@ class PowerMonitor(Node):
         self.current_window_size = self.get_parameter('current_averaging_window').value
         self.home_timeout = self.get_parameter('home_position_timeout').value
         self.sitl_mode = self.get_parameter('sitl_mode').value
-        self.sitl_drain_rate = self.get_parameter('sitl_battery_drain_rate').value
 
         # State
         self.battery_status = None
@@ -50,11 +48,8 @@ class PowerMonitor(Node):
         self.command_retry_count = 0
         self.max_command_retries = 3
         self.last_command_time = 0
-        self.command_cooldown = 5.0  # seconds between retry attempts
-        
-        # SITL battery simulation
-        self.sitl_battery_start = 100.0
-        self.armed_time = None
+        self.command_cooldown = 5.0
+        self.failsafe_notified = False  # Track if we've notified about failsafe
         
         # Current averaging
         self.current_history = deque(maxlen=self.current_window_size)
@@ -86,7 +81,7 @@ class PowerMonitor(Node):
 
         self.get_logger().info('✅ PowerMonitor node initialized')
         if self.sitl_mode:
-            self.get_logger().info(f'🎮 SITL mode: simulating battery drain at {self.sitl_drain_rate}% per minute')
+            self.get_logger().info('🎮 Running in SITL mode')
 
     def battery_callback(self, msg):
         with self.lock:
@@ -109,14 +104,13 @@ class PowerMonitor(Node):
         with self.lock:
             self.vehicle_status = msg
             
-            # Track armed time for SITL battery simulation
-            if self.sitl_mode and msg.arming_state == 2:  # Armed
-                if self.armed_time is None:
-                    self.armed_time = time.time()
-                    self.get_logger().info('🚁 Vehicle armed - starting battery simulation')
-            elif self.armed_time is not None:
-                self.armed_time = None
-                self.get_logger().info('🚁 Vehicle disarmed - stopping battery simulation')
+            # Check and notify about failsafe status changes
+            if msg.failsafe and not self.failsafe_notified:
+                self.get_logger().info('PX4 failsafe active - letting it handle the situation')
+                self.failsafe_notified = True
+            elif not msg.failsafe and self.failsafe_notified:
+                self.get_logger().info('PX4 failsafe cleared')
+                self.failsafe_notified = False
 
     def command_ack_callback(self, msg):
         with self.lock:
@@ -128,13 +122,12 @@ class PowerMonitor(Node):
                     self.rtl_triggered = True
                 elif msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:
                     self.get_logger().warn('⏳ RTL command temporarily rejected - will retry')
-                    # Don't increment retry count for temporary rejection
                 else:
                     self.get_logger().error(f'❌ RTL mode change failed: result={msg.result}')
                     self.command_retry_count += 1
                     if self.command_retry_count >= self.max_command_retries:
                         self.get_logger().error('❌ Max retries reached - giving up on RTL command')
-                        self.rtl_triggered = True  # Don't keep trying
+                        self.rtl_triggered = True
 
     def get_current_mode(self):
         if not self.vehicle_status:
@@ -182,32 +175,12 @@ class PowerMonitor(Node):
         self.vehicle_command_pub.publish(msg)
         self.last_command_time = current_time
 
-    def get_simulated_battery_percentage(self):
-        """Simulate battery drain in SITL mode"""
-        if not self.sitl_mode or self.armed_time is None:
-            return None
-            
-        # Calculate time armed in minutes
-        armed_minutes = (time.time() - self.armed_time) / 60.0
-        
-        # Calculate simulated battery
-        simulated_battery = self.sitl_battery_start - (armed_minutes * self.sitl_drain_rate)
-        simulated_battery = max(0.0, simulated_battery)  # Don't go below 0
-        
-        return simulated_battery
-
     def get_battery_percentage(self):
-        """Get battery percentage with SITL simulation override"""
+        """Get battery percentage from real PX4 data only"""
         if self.battery_status is None:
             return None
             
-        # In SITL mode, use simulated battery if armed
-        if self.sitl_mode:
-            simulated = self.get_simulated_battery_percentage()
-            if simulated is not None:
-                return simulated
-        
-        # Otherwise use real battery data
+        # Use real battery data from PX4
         if hasattr(self.battery_status, 'remaining'):
             if self.battery_status.remaining <= 1.0:
                 return self.battery_status.remaining * 100
@@ -222,13 +195,13 @@ class PowerMonitor(Node):
 
         avg_current = self.get_average_current()
         if avg_current is None or avg_current < self.min_current:
-            # In SITL, estimate based on drain rate
-            if self.sitl_mode and battery_percentage > 0:
-                minutes_remaining = battery_percentage / self.sitl_drain_rate
-                return minutes_remaining * 60.0  # Convert to seconds
+            # Can't calculate time without current
             return None
 
         capacity = self.battery_capacity
+        if hasattr(self.battery_status, 'capacity') and self.battery_status.capacity > 0:
+            capacity = self.battery_status.capacity
+
         remaining_mah = (battery_percentage / 100.0) * capacity
         current_draw_ma = avg_current * 1000.0
         time_hours = remaining_mah / current_draw_ma
@@ -265,7 +238,6 @@ class PowerMonitor(Node):
 
             # Skip if PX4 failsafe is already active
             if self.is_failsafe_active():
-                self.get_logger().debug('PX4 failsafe active - skipping battery check')
                 return
 
             if self.home_position is None:
@@ -295,14 +267,17 @@ class PowerMonitor(Node):
             base_return_time = distance / self.return_speed
             safety_return_time = base_return_time * (1 + self.safety_margin) + 60.0
 
-            # Log status
-            self.get_logger().info(
-                f'🔋 Battery: {battery_percentage:.1f}%, '
-                f'⏳ Remaining: {remaining_time:.1f}s, ' if remaining_time else ''
-                f'🏠 Distance: {distance:.1f}m, '
-                f'🔁 Needed: {safety_return_time:.1f}s, '
-                f'📍 Mode: {current_mode}'
-            )
+            # Build log message
+            log_msg = f'🔋 Battery: {battery_percentage:.1f}%, '
+            if remaining_time is not None:
+                log_msg += f'⏳ Remaining: {remaining_time:.1f}s, '
+            else:
+                log_msg += '⏳ Remaining: N/A (no current data), '
+            log_msg += f'🏠 Distance: {distance:.1f}m, '
+            log_msg += f'🔁 Needed: {safety_return_time:.1f}s, '
+            log_msg += f'📍 Mode: {current_mode}'
+            
+            self.get_logger().info(log_msg)
 
             # Check RTL conditions
             should_rtl = False
