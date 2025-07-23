@@ -24,13 +24,13 @@ class MissionSupervisor(Node):
         super().__init__('mission_supervisor')
         
         # Declare parameters
-        self.declare_parameter('heartbeat_timeout', 30.0)
+        self.declare_parameter('heartbeat_timeout', 20.0)
         self.declare_parameter('telemetry_timeout', 10.0)
         self.declare_parameter('mission_timeout', 3600.0)
         self.declare_parameter('check_interval', 1.0)
         self.declare_parameter('critical_battery_threshold', 5.0)
         self.declare_parameter('startup_grace_period', 10.0)
-        self.declare_parameter('command_cooldown', 10.0)  
+        self.declare_parameter('command_cooldown', 5.0)  
         
         # Get parameters
         self.heartbeat_timeout = self.get_parameter('heartbeat_timeout').value
