@@ -20,9 +20,9 @@ class FaultDetector(Node):
                 ('min_fix_type', 3),
                 ('check_interval', 5.0),  # INCREASED from 2.0
                 ('estimator_timeout', 20.0),  
-                ('startup_grace_period', 20.0),  
+                ('startup_grace_period', 15.0),  
                 ('sitl_mode', True),
-                ('emergency_command_cooldown', 10.0),  
+                ('emergency_command_cooldown', 5.0),  
                 ('gps_failure_count_threshold', 3),  
             ]
         )
