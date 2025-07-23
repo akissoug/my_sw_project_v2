@@ -37,22 +37,7 @@ source install/setup.bash
 
 ## Running Simulation - Method 1: Using Launch File
 
-```bash
-# Terminal 1: Launch everything
-cd ~/sw_ws
-source install/setup.bash
-ros2 launch seawings_mission_management seawings_mission.launch.py
 
-# This will open multiple terminals automatically:
-# - XRCE-DDS Agent
-# - PX4 SITL with Gazebo
-# - PowerMonitor node
-# - FaultDetector node
-# - MissionSupervisor node
-
-# Terminal 2: Start QGroundControl
-QGroundControl.AppImage
-```
 
 ## Running Simulation - Method 2: Manual (Separate Terminals)
 
