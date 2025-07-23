@@ -16,7 +16,7 @@ class PowerMonitor(Node):
 
         # Parameters
         self.declare_parameter('safety_margin', 0.3)
-        self.declare_parameter('average_return_speed', 8.0)
+        self.declare_parameter('average_return_speed', 12.0)
         self.declare_parameter('battery_check_interval', 3.0)
         self.declare_parameter('min_battery_voltage', 14.0)
         self.declare_parameter('rtl_triggered_threshold', 0.25)
