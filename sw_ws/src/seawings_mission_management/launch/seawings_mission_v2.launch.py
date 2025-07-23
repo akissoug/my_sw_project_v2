@@ -61,7 +61,7 @@ def generate_launch_description():
     power_monitor_terminal = ExecuteProcess(
         cmd=[
             'terminator', '-e',
-            f'bash -c \'source {os.path.join(home_dir, "seawings_ws/install/setup.bash")} && '
+            f'bash -c \'source {os.path.join(home_dir, "sw_ws/install/setup.bash")} && '
             f'echo "🔋 Power Monitor launching..." && '
             f'ros2 run seawings_mission_management power_monitor --ros-args -p config_file:={config_file}; exec bash\''
         ],
@@ -73,7 +73,7 @@ def generate_launch_description():
     fault_detector_terminal = ExecuteProcess(
         cmd=[
             'terminator', '-e',
-            f'bash -c \'source {os.path.join(home_dir, "seawings_ws/install/setup.bash")} && '
+            f'bash -c \'source {os.path.join(home_dir, "sw_ws/install/setup.bash")} && '
             f'echo "🛰️ Fault Detector launching..." && '
             f'ros2 run seawings_mission_management fault_detector --ros-args -p config_file:={config_file}; exec bash\''
         ],
@@ -85,7 +85,7 @@ def generate_launch_description():
     mission_supervisor_terminal = ExecuteProcess(
         cmd=[
             'terminator', '-e',
-            f'bash -c \'source {os.path.join(home_dir, "seawings_ws/install/setup.bash")} && '
+            f'bash -c \'source {os.path.join(home_dir, "sw_ws/install/setup.bash")} && '
             f'echo "🎯 Mission Supervisor launching..." && '
             f'ros2 run seawings_mission_management mission_supervisor --ros-args -p config_file:={config_file}; exec bash\''
         ],
