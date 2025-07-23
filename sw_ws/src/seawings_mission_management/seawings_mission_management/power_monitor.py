@@ -25,6 +25,7 @@ class PowerMonitor(Node):
         self.declare_parameter('current_averaging_window', 10)
         self.declare_parameter('home_position_timeout', 30.0)
         self.declare_parameter('sitl_mode', True)
+        self.declare_parameter('command_cooldown', 10.0)
 
         self.safety_margin = self.get_parameter('safety_margin').value
         self.return_speed = self.get_parameter('average_return_speed').value
@@ -35,6 +36,7 @@ class PowerMonitor(Node):
         self.current_window_size = self.get_parameter('current_averaging_window').value
         self.home_timeout = self.get_parameter('home_position_timeout').value
         self.sitl_mode = self.get_parameter('sitl_mode').value
+        self.command_cooldown = self.get_parameter('command_cooldown').value
 
         # State
         self.battery_status = None
