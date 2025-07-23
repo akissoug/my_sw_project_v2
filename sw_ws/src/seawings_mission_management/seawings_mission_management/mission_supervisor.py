@@ -28,8 +28,9 @@ class MissionSupervisor(Node):
         self.declare_parameter('telemetry_timeout', 10.0)
         self.declare_parameter('mission_timeout', 3600.0)
         self.declare_parameter('check_interval', 1.0)
-        self.declare_parameter('critical_battery_threshold', 5.0)  # 5% for real critical
-        self.declare_parameter('startup_grace_period', 10.0)  # Grace period for startup
+        self.declare_parameter('critical_battery_threshold', 5.0)
+        self.declare_parameter('startup_grace_period', 10.0)
+        self.declare_parameter('command_cooldown', 10.0)  
         
         # Get parameters
         self.heartbeat_timeout = self.get_parameter('heartbeat_timeout').value
@@ -38,6 +39,7 @@ class MissionSupervisor(Node):
         self.check_interval = self.get_parameter('check_interval').value
         self.critical_battery = self.get_parameter('critical_battery_threshold').value
         self.startup_grace = self.get_parameter('startup_grace_period').value
+        self.command_cooldown = self.get_parameter('command_cooldown').value  
         
         # State variables
         self.mission_state = MissionState.IDLE
@@ -51,6 +53,12 @@ class MissionSupervisor(Node):
         self.data_lock = Lock()
         self.last_command_result = None
         self.node_start_time = time.time()
+        
+        # NEW: Command rate limiting
+        self.last_command_time = 0
+        self.pending_mode_change = None
+        self.mode_change_attempts = 0
+        self.max_mode_change_attempts = 3
         
         # Define QoS profile for PX4 topics
         px4_qos_profile = QoSProfile(
@@ -106,8 +114,9 @@ class MissionSupervisor(Node):
         # Timer for periodic mission supervision
         self.timer = self.create_timer(self.check_interval, self.supervise_mission)
         
-        self.get_logger().info('MissionSupervisor node initialized with direct PX4 control')
+        self.get_logger().info('MissionSupervisor node initialized with rate limiting')
         self.get_logger().info(f'Critical battery threshold: {self.critical_battery}%')
+        self.get_logger().info(f'Command cooldown: {self.command_cooldown}s')
         
     def vehicle_status_callback(self, msg):
         with self.data_lock:
@@ -126,10 +135,25 @@ class MissionSupervisor(Node):
     def command_ack_callback(self, msg):
         with self.data_lock:
             self.last_command_result = msg
-            if msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:
-                self.get_logger().info(f'✅ Command {msg.command} accepted')
-            else:
-                self.get_logger().error(f'❌ Command {msg.command} failed: {msg.result}')
+            
+            # Check if this was our pending mode change
+            if msg.command == VehicleCommand.VEHICLE_CMD_DO_SET_MODE and self.pending_mode_change:
+                if msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:
+                    self.get_logger().info(f'✅ Mode change to {self.pending_mode_change} accepted')
+                    self.pending_mode_change = None
+                    self.mode_change_attempts = 0
+                elif msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:
+                    self.get_logger().warn(f'⏳ Mode change to {self.pending_mode_change} temporarily rejected')
+                    self.mode_change_attempts += 1
+                else:
+                    self.get_logger().error(f'❌ Mode change to {self.pending_mode_change} failed: {msg.result}')
+                    self.mode_change_attempts += 1
+                    
+                # Give up after max attempts
+                if self.mode_change_attempts >= self.max_mode_change_attempts:
+                    self.get_logger().error(f'Giving up on mode change after {self.mode_change_attempts} attempts')
+                    self.pending_mode_change = None
+                    self.mode_change_attempts = 0
     
     def get_battery_percentage(self):
         """Get battery percentage handling both 0-1 and 0-100 scales"""
@@ -147,7 +171,6 @@ class MissionSupervisor(Node):
         if not self.vehicle_status:
             return "UNKNOWN"
         
-        # Extended mapping including all nav states
         mode_map = {
             0: "MANUAL", 1: "ALTITUDE", 2: "POSITION", 3: "AUTO.LOITER",
             4: "AUTO.MISSION", 5: "AUTO.RTL", 6: "AUTO.LAND", 7: "AUTO.TAKEOFF",
@@ -166,7 +189,6 @@ class MissionSupervisor(Node):
             return self.vehicle_status.failsafe
         return False
     
-    
     def is_armed(self):
         if not self.vehicle_status:
             return False
@@ -177,6 +199,15 @@ class MissionSupervisor(Node):
         return (time.time() - self.node_start_time) < self.startup_grace
     
     def send_vehicle_command(self, command, param1=0.0, param2=0.0):
+        """Send command with rate limiting"""
+        current_time = time.time()
+        
+        # Check cooldown
+        if current_time - self.last_command_time < self.command_cooldown:
+            time_left = self.command_cooldown - (current_time - self.last_command_time)
+            self.get_logger().debug(f'Command cooldown active ({time_left:.1f}s remaining)')
+            return False
+        
         msg = VehicleCommand()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         msg.param1 = param1
@@ -194,6 +225,8 @@ class MissionSupervisor(Node):
         msg.from_external = True
         
         self.vehicle_command_pub.publish(msg)
+        self.last_command_time = current_time
+        return True
             
     def supervise_mission(self):
         """Main mission supervision logic"""
@@ -202,6 +235,10 @@ class MissionSupervisor(Node):
             
             # Update mission state
             self.update_mission_state()
+            
+            # Retry pending mode changes
+            if self.pending_mode_change and (current_time - self.last_command_time) >= self.command_cooldown:
+                self.retry_mode_change()
             
             # Skip emergency checks during startup grace period
             if not self.is_in_startup_grace_period():
@@ -255,8 +292,6 @@ class MissionSupervisor(Node):
             self.get_logger().info(f'Mission state changed: {old_state.name} -> {self.mission_state.name}')
             
     def check_communication_health(self, current_time):
-
-        # Is it ok here to check failsafe?
         if self.is_failsafe_active():
             self.get_logger().info('PX4 failsafe active - letting it handle the situation')
             return
@@ -322,6 +357,21 @@ class MissionSupervisor(Node):
             self.get_logger().error('PX4 failsafe activated')
             
     def trigger_mode_change(self, mode, reason):
+        """Trigger mode change with rate limiting"""
+        # Check if already in target mode
+        current_mode = self.get_current_mode()
+        if mode == 'RTL' and current_mode == 'AUTO.RTL':
+            self.get_logger().debug('Already in RTL mode')
+            return
+        elif mode == 'LAND' and current_mode in ['AUTO.LAND', 'AUTO.LAND_ENGAGED']:
+            self.get_logger().debug('Already in LAND mode')
+            return
+        
+        # Don't override pending changes
+        if self.pending_mode_change:
+            self.get_logger().debug(f'Mode change to {mode} requested but {self.pending_mode_change} is pending')
+            return
+        
         self.get_logger().info(f'Triggering mode change to {mode}: {reason}')
         
         mode_map = {
@@ -333,25 +383,51 @@ class MissionSupervisor(Node):
         }
         
         if mode in mode_map:
-            self.send_vehicle_command(
+            if self.send_vehicle_command(
                 VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
                 param1=1.0,
                 param2=mode_map[mode]
-            )
+            ):
+                self.pending_mode_change = mode
+                self.mode_change_attempts = 1
         else:
             self.get_logger().error(f'Unknown mode: {mode}')
+    
+    def retry_mode_change(self):
+        """Retry pending mode change"""
+        if not self.pending_mode_change:
+            return
+            
+        self.get_logger().info(f'Retrying mode change to {self.pending_mode_change} (attempt {self.mode_change_attempts + 1})')
+        
+        mode_map = {
+            'RTL': 5.0,
+            'LAND': 6.0,
+            'MISSION': 4.0,
+            'LOITER': 3.0,
+            'POSITION': 2.0
+        }
+        
+        if self.pending_mode_change in mode_map:
+            self.send_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                param1=1.0,
+                param2=mode_map[self.pending_mode_change]
+            )
             
     def arm_vehicle(self):
-        self.send_vehicle_command(
+        if self.send_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
             param1=1.0
-        )
+        ):
+            self.get_logger().info('Arm command sent')
         
     def disarm_vehicle(self):
-        self.send_vehicle_command(
+        if self.send_vehicle_command(
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
             param1=0.0
-        )
+        ):
+            self.get_logger().info('Disarm command sent')
             
     def publish_mission_status(self):
         msg = String()
