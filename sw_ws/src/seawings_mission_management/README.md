@@ -51,10 +51,8 @@ MicroXRCEAgent udp4 -p 8888
 cd ~/PX4-Autopilot
 make px4_sitl gazebo
 
-# Wait for these messages:
-# INFO  [init] PX4_SIM_HOSTNAME: localhost
-# INFO  [simulator] Waiting for simulator to accept connection on TCP port 4560
-# INFO  [simulator] Simulator connected on TCP port 4560.
+# Wait for this message:
+
 # INFO  [commander] Ready for takeoff!
 ```
 
