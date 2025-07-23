@@ -27,7 +27,7 @@ class MissionSupervisor(Node):
         self.declare_parameter('heartbeat_timeout', 20.0)
         self.declare_parameter('telemetry_timeout', 10.0)
         self.declare_parameter('mission_timeout', 3600.0)
-        self.declare_parameter('check_interval', 1.0)
+        self.declare_parameter('check_interval', 3.0)
         self.declare_parameter('critical_battery_threshold', 5.0)
         self.declare_parameter('startup_grace_period', 10.0)
         self.declare_parameter('command_cooldown', 5.0)  
