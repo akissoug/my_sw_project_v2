@@ -104,7 +104,15 @@ class PowerMonitor(Node):
 
     def status_callback(self, msg):
         with self.lock:
+            previous_arming = self.vehicle_status.arming_state if self.vehicle_status else None
             self.vehicle_status = msg
+
+            # Detect transition from disarmed → armed (TO check again if it works!)
+            if previous_arming != msg.arming_state:
+                if msg.arming_state == 2:  # ARMED
+                    self.get_logger().info("🚀 New flight detected - resetting RTL logic")
+                    self.rtl_triggered = False
+                    self.command_retry_count = 0
             
             # Check and notify about failsafe status changes
             if msg.failsafe and not self.failsafe_notified:
@@ -297,7 +305,9 @@ class PowerMonitor(Node):
 
     def trigger_rtl(self, reason="battery low"):
         if self.rtl_triggered:
-            return
+           #return (changed this, but consider it again later)
+            #Skip triggering new RTL, but still log battery state
+            self.get_logger().debug('🔁 RTL already triggered – skipping command check')
         
         self.get_logger().warn(f'⚠️ Triggering RTL: {reason}')
         self.send_vehicle_command(
